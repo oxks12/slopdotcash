@@ -213,23 +213,30 @@ test("a non-2xx or unreachable endpoint fails its check", async () => {
 
 test("a request that exceeds the bound times out as a failure, without retry", async () => {
   let calls = 0;
-  const results = await runProductionWatch({
-    now: () => NOW,
-    timeoutMs: 20,
-    fetcher: async (url, init) => {
-      if (url !== `${ORIGIN}/`) return site().fetcher(url);
-      calls += 1;
-      return await new Promise<Response>((_, reject) =>
-        init.signal?.addEventListener("abort", () =>
-          reject(init.signal?.reason),
-        ),
-      );
-    },
+  // Exercise the real HTTP deadline. A signal-only pending promise can leave
+  // Bun's Windows runner waiting forever with no active transport handle.
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Promise<Response>(() => {}),
   });
-  expect(calls).toBe(1);
-  expect(results.filter((r) => !r.ok)).toEqual([
-    { ok: false, check: "site home", detail: "timed out after 20 ms" },
-  ]);
+  try {
+    const results = await runProductionWatch({
+      now: () => NOW,
+      timeoutMs: 20,
+      fetcher: async (url, init) => {
+        if (url !== `${ORIGIN}/`) return site().fetcher(url);
+        calls += 1;
+        return fetch(server.url, init);
+      },
+    });
+    expect(calls).toBe(1);
+    expect(results.filter((r) => !r.ok)).toEqual([
+      { ok: false, check: "site home", detail: "timed out after 20 ms" },
+    ]);
+  } finally {
+    await server.stop(true);
+  }
 });
 
 test("an inactive network's old snapshot passes, but it must still exist", async () => {
